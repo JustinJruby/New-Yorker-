@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd job: runs the scraper every Monday at 8:00 AM.
+  Edit the two REPLACE_ME paths below, then install with:
+
+    cp com.newyorker.kindle.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.newyorker.kindle.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.newyorker.kindle</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>python3</string>
+    <string>REPLACE_ME/newyorker_to_kindle.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>REPLACE_ME</string>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key>
+    <integer>1</integer>
+    <key>Hour</key>
+    <integer>8</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/newyorker-kindle.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/newyorker-kindle.log</string>
+</dict>
+</plist>

@@ -1,0 +1,7 @@
+config.ini
+cookies.txt
+*.pdf
+__pycache__/
+.venv/
+venv/
+.DS_Store
