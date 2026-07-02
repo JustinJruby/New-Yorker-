@@ -11,9 +11,11 @@ export your logged-in browser cookies to cookies.txt so the scraper
 can read full articles instead of the paywall preview.
 
 Usage:
-    python3 newyorker_to_kindle.py                  # scrape, build PDF, email it
-    python3 newyorker_to_kindle.py --no-email       # just build the PDF
-    python3 newyorker_to_kindle.py --limit 3        # only first 3 articles (testing)
+    python3 newyorker_to_kindle.py                    # current issue -> PDF -> email
+    python3 newyorker_to_kindle.py --no-email         # just build the PDF
+    python3 newyorker_to_kindle.py --limit 3          # only first 3 articles (testing)
+    python3 newyorker_to_kindle.py --issue 2026-06-29 # a specific back issue
+    python3 newyorker_to_kindle.py --list-issues      # show recent issues (archive)
 
 Configuration lives in config.ini (see config.example.ini).
 """
@@ -38,6 +40,7 @@ from bs4 import BeautifulSoup
 
 BASE_URL = "https://www.newyorker.com"
 MAGAZINE_URL = BASE_URL + "/magazine"
+ARCHIVE_URL = BASE_URL + "/archive"
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
@@ -78,31 +81,70 @@ def make_session(cookies_file: str | None) -> requests.Session:
     return session
 
 
-def get_current_issue(session: requests.Session) -> tuple[str, list[str]]:
-    """Return (issue_date, article_urls) for the current issue."""
+ISSUE_PATH_RE = re.compile(
+    r"magazine(?:/|\\u002F)(\d{4})(?:/|\\u002F)(\d{2})(?:/|\\u002F)(\d{2})(?![/\\\d])"
+)
+
+
+def get_current_issue_date(session: requests.Session) -> str:
+    """Find the date of the current issue from the magazine landing page."""
     resp = session.get(MAGAZINE_URL, timeout=30)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    seen: dict[str, str] = {}  # path -> date, insertion-ordered
+    dates = []
     for a in soup.find_all("a", href=True):
         match = ARTICLE_LINK_RE.match(a["href"])
         if match:
-            date = "-".join(match.groups())
-            seen.setdefault(a["href"], date)
-
-    if not seen:
+            dates.append("-".join(match.groups()))
+    if not dates:
         raise RuntimeError(
             "No article links found on the magazine page. "
             "The New Yorker may have changed its page layout."
         )
+    # The landing page can also link a few older pieces; the date most
+    # of the article links share is the current issue's cover date.
+    return Counter(dates).most_common(1)[0][0]
 
-    # The magazine page can also link a few older pieces; keep only the
-    # issue date that the majority of the article links share.
-    issue_date = Counter(seen.values()).most_common(1)[0][0]
-    urls = [urljoin(BASE_URL, path)
-            for path, date in seen.items() if date == issue_date]
-    return issue_date, urls
+
+def list_archive_issues(session: requests.Session) -> list[str]:
+    """Return recent issue dates (newest first) from the archive page."""
+    resp = session.get(ARCHIVE_URL, timeout=30)
+    resp.raise_for_status()
+    dates = {"-".join(m.groups()) for m in ISSUE_PATH_RE.finditer(resp.text)}
+    if not dates:
+        raise RuntimeError(
+            "No issues found on the archive page. "
+            "The New Yorker may have changed its page layout."
+        )
+    return sorted(dates, reverse=True)
+
+
+def get_issue_articles(session: requests.Session, issue_date: str) -> list[str]:
+    """Fetch an issue's table-of-contents page and return its article URLs."""
+    issue_url = f"{BASE_URL}/magazine/{issue_date.replace('-', '/')}"
+    resp = session.get(issue_url, timeout=30)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    urls: list[str] = []
+    for a in soup.find_all("a", href=True):
+        match = ARTICLE_LINK_RE.match(a["href"])
+        if not match:
+            continue
+        # Skip recirculation links to pieces from other issues.
+        if "-".join(match.groups()) != issue_date:
+            continue
+        url = urljoin(BASE_URL, a["href"])
+        if url not in urls:
+            urls.append(url)
+
+    if not urls:
+        raise RuntimeError(
+            f"No articles found on the issue page {issue_url}. "
+            "Check the date, or The New Yorker may have changed its layout."
+        )
+    return urls
 
 
 def _first_text(soup: BeautifulSoup, selector: str) -> str:
@@ -362,6 +404,11 @@ def main() -> int:
                         help="Only scrape the first N articles (for testing)")
     parser.add_argument("--no-email", action="store_true",
                         help="Build the PDF but don't email it")
+    parser.add_argument("--issue", default=None, metavar="YYYY-MM-DD",
+                        help="Build a specific issue instead of the current "
+                             "one (also accepts a full issue URL)")
+    parser.add_argument("--list-issues", action="store_true",
+                        help="List recent issues from the archive and exit")
     args = parser.parse_args()
 
     config = load_config(Path(args.config))
@@ -369,11 +416,29 @@ def main() -> int:
                                               fallback=None)
     session = make_session(cookies_file)
 
-    print("Fetching current issue...")
-    issue_date, urls = get_current_issue(session)
+    if args.list_issues:
+        print("Recent issues (newest first):")
+        for date in list_archive_issues(session):
+            print(f"  {date}")
+        print("\nBuild one with: python3 newyorker_to_kindle.py --issue <date>")
+        return 0
+
+    if args.issue:
+        match = re.search(r"(\d{4})[-/](\d{2})[-/](\d{2})", args.issue)
+        if not match:
+            print(f"Could not parse issue date from {args.issue!r}; "
+                  "expected YYYY-MM-DD.", file=sys.stderr)
+            return 1
+        issue_date = "-".join(match.groups())
+    else:
+        print("Finding current issue...")
+        issue_date = get_current_issue_date(session)
+
+    print(f"Fetching table of contents for the issue of {issue_date}...")
+    urls = get_issue_articles(session, issue_date)
     if args.limit:
         urls = urls[: args.limit]
-    print(f"Issue of {issue_date}: {len(urls)} articles")
+    print(f"{len(urls)} articles")
 
     with tempfile.TemporaryDirectory(prefix="nyk_images_") as tmp:
         image_dir = Path(tmp)

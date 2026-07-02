@@ -72,7 +72,18 @@ python3 newyorker_to_kindle.py --no-email
 
 # Quick test with only the first 2 articles
 python3 newyorker_to_kindle.py --limit 2 --no-email
+
+# Browse the archive (https://www.newyorker.com/archive)
+python3 newyorker_to_kindle.py --list-issues
+
+# Build a specific back issue
+python3 newyorker_to_kindle.py --issue 2026-06-29
 ```
+
+The scraper works from the issue's own table-of-contents page
+(`newyorker.com/magazine/YYYY/MM/DD`), so you get exactly the articles
+in that issue — by default the current one, or any back issue you pick
+from the archive with `--issue`.
 
 The PDF is written to `new-yorker-<issue-date>.pdf` in the current
 directory (override with `--output`).
