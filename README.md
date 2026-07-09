@@ -1,9 +1,9 @@
 # New Yorker → Kindle
 
 Scrapes the current issue of The New Yorker, bundles the articles into a
-single Kindle-friendly PDF (cover page + table of contents + articles),
-and emails it to your Send-to-Kindle address so it shows up on your
-Kindle automatically.
+single Kindle-friendly file (cover page + table of contents + articles;
+EPUB by default, PDF or plain text if you prefer), and emails it to your
+Send-to-Kindle address so it shows up on your Kindle automatically.
 
 For personal use with your own New Yorker subscription.
 
@@ -88,13 +88,18 @@ from the archive with `--issue`.
 The PDF is written to `new-yorker-<issue-date>.pdf` in the current
 directory (override with `--output`).
 
-### The "convert" option
+### Which format?
 
-With `convert = true` (the default), the email subject is set to
-`convert`, which tells Amazon to convert the PDF into a reflowable
-Kindle document — you can change the font size on the device, and it
-reads like a normal Kindle book. Set it to `false` if you'd rather
-have the fixed-layout PDF pages.
+Set `format` in `config.ini` (or pass `--format`):
+
+- **epub** (default, recommended) — Amazon converts it to a native
+  Kindle book: reflowable text, adjustable font size, images, and a
+  real table of contents you can jump around with.
+- **pdf** — fixed 6"×8" pages. With `convert = true` the email subject
+  is set to `convert`, which asks Amazon to reflow the PDF into a
+  Kindle document; with `false` you get the fixed pages as-is.
+- **txt** — plain text, maximally robust, but no images, no italics,
+  and no chapter navigation.
 
 ## Run it automatically every week
 

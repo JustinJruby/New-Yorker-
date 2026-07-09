@@ -22,12 +22,15 @@ Configuration lives in config.ini (see config.example.ini).
 
 import argparse
 import configparser
+import datetime
+import html as html_module
 import re
 import smtplib
 import ssl
 import sys
 import tempfile
 import time
+import zipfile
 from collections import Counter
 from email.message import EmailMessage
 from html import escape
@@ -333,10 +336,188 @@ def html_to_pdf(html: str, output_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------
+# EPUB generation
+# --------------------------------------------------------------------------
+
+EPUB_CSS = """
+body { font-family: serif; line-height: 1.5; }
+h1 { font-size: 1.5em; margin: 0 0 0.3em 0; }
+.rubric { font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.08em;
+          color: #555; margin-bottom: 0.2em; }
+.dek { font-style: italic; font-size: 1.1em; margin-bottom: 0.3em; }
+.byline { margin-bottom: 1.2em; }
+.figure { margin: 1em 0; }
+.figure img { max-width: 100%; }
+.caption { font-size: 0.8em; color: #555; }
+.truncated { color: #833; font-style: italic; }
+blockquote { font-style: italic; }
+"""
+
+IMAGE_MEDIA_TYPES = {".jpg": "image/jpeg", ".png": "image/png",
+                     ".gif": "image/gif", ".webp": "image/webp"}
+LOCAL_IMG_RE = re.compile(r'<img src="([^"]+)"/>')
+
+
+def _xhtml_page(title: str, body: str) -> str:
+    return (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<html xmlns="http://www.w3.org/1999/xhtml"><head>'
+        f"<title>{escape(title)}</title>"
+        '<link rel="stylesheet" type="text/css" href="style.css"/>'
+        f"</head><body>{body}</body></html>"
+    )
+
+
+def _article_xhtml(article: dict, img_names: dict[str, str]) -> str:
+    header = ""
+    if article["rubric"]:
+        header += f'<p class="rubric">{escape(article["rubric"])}</p>'
+    header += f"<h1>{escape(article['title'])}</h1>"
+    if article["dek"]:
+        header += f'<p class="dek">{escape(article["dek"])}</p>'
+    if article["byline"]:
+        header += f'<p class="byline">By {escape(article["byline"])}</p>'
+    body = LOCAL_IMG_RE.sub(
+        lambda m: f'<img src="images/{img_names[m.group(1)]}"/>'
+        if m.group(1) in img_names else "",
+        article["body_html"],
+    )
+    notice = ""
+    if article["truncated"]:
+        notice = ('<p class="truncated">[Article truncated by paywall — '
+                  "add subscriber cookies to get full text.]</p>")
+    return _xhtml_page(article["title"], header + body + notice)
+
+
+def build_epub(issue_date: str, articles: list[dict], output_path: Path) -> None:
+    """Package the articles as an EPUB3 file (no external dependencies)."""
+    # Map local image paths (referenced in body_html) to archive names.
+    img_names: dict[str, str] = {}
+    for a in articles:
+        for path in LOCAL_IMG_RE.findall(a["body_html"]):
+            if path not in img_names and Path(path).suffix in IMAGE_MEDIA_TYPES:
+                img_names[path] = Path(path).name
+
+    chapters = [(f"chap_{i:03d}.xhtml", a) for i, a in enumerate(articles, 1)]
+
+    manifest = ['<item id="nav" href="nav.xhtml" '
+                'media-type="application/xhtml+xml" properties="nav"/>',
+                '<item id="css" href="style.css" media-type="text/css"/>',
+                '<item id="cover" href="cover.xhtml" '
+                'media-type="application/xhtml+xml"/>']
+    spine = ['<itemref idref="cover"/>']
+    for i, (name, _) in enumerate(chapters, 1):
+        manifest.append(f'<item id="c{i}" href="{name}" '
+                        'media-type="application/xhtml+xml"/>')
+        spine.append(f'<itemref idref="c{i}"/>')
+    for j, (path, arcname) in enumerate(img_names.items(), 1):
+        media = IMAGE_MEDIA_TYPES[Path(path).suffix]
+        manifest.append(f'<item id="img{j}" href="images/{arcname}" '
+                        f'media-type="{media}"/>')
+
+    modified = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    opf = f"""<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="uid">urn:newyorker-to-kindle:{issue_date}</dc:identifier>
+    <dc:title>The New Yorker — {issue_date}</dc:title>
+    <dc:creator>The New Yorker</dc:creator>
+    <dc:language>en</dc:language>
+    <meta property="dcterms:modified">{modified}</meta>
+  </metadata>
+  <manifest>{"".join(manifest)}</manifest>
+  <spine>{"".join(spine)}</spine>
+</package>"""
+
+    toc_items = "".join(
+        f'<li><a href="{name}">{escape(a["title"])}</a></li>'
+        for name, a in chapters)
+    nav = (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<html xmlns="http://www.w3.org/1999/xhtml" '
+        'xmlns:epub="http://www.idpf.org/2007/ops"><head>'
+        "<title>In This Issue</title>"
+        '<link rel="stylesheet" type="text/css" href="style.css"/></head>'
+        '<body><nav epub:type="toc"><h1>In This Issue</h1>'
+        f"<ol>{toc_items}</ol></nav></body></html>"
+    )
+
+    cover = _xhtml_page(
+        f"The New Yorker — {issue_date}",
+        f"<h1>The New Yorker</h1><p>Issue of {escape(issue_date)}</p>"
+        f"<p>{len(articles)} articles</p>",
+    )
+
+    with zipfile.ZipFile(output_path, "w") as zf:
+        # The mimetype entry must be first and uncompressed.
+        zf.writestr("mimetype", "application/epub+zip",
+                    compress_type=zipfile.ZIP_STORED)
+        zf.writestr("META-INF/container.xml",
+                    '<?xml version="1.0" encoding="utf-8"?>\n'
+                    '<container version="1.0" xmlns="urn:oasis:names:tc:'
+                    'opendocument:xmlns:container"><rootfiles>'
+                    '<rootfile full-path="OEBPS/content.opf" '
+                    'media-type="application/oebps-package+xml"/>'
+                    "</rootfiles></container>",
+                    compress_type=zipfile.ZIP_DEFLATED)
+        zf.writestr("OEBPS/content.opf", opf, zipfile.ZIP_DEFLATED)
+        zf.writestr("OEBPS/nav.xhtml", nav, zipfile.ZIP_DEFLATED)
+        zf.writestr("OEBPS/style.css", EPUB_CSS, zipfile.ZIP_DEFLATED)
+        zf.writestr("OEBPS/cover.xhtml", cover, zipfile.ZIP_DEFLATED)
+        for name, a in chapters:
+            zf.writestr(f"OEBPS/{name}", _article_xhtml(a, img_names),
+                        zipfile.ZIP_DEFLATED)
+        for path, arcname in img_names.items():
+            zf.write(path, f"OEBPS/images/{arcname}", zipfile.ZIP_DEFLATED)
+
+
+# --------------------------------------------------------------------------
+# Plain-text generation
+# --------------------------------------------------------------------------
+
+def build_txt(issue_date: str, articles: list[dict]) -> str:
+    """Render the issue as plain text (no images, no formatting)."""
+    rule = "=" * 62
+    out = [f"THE NEW YORKER — ISSUE OF {issue_date}", rule, "", "IN THIS ISSUE", ""]
+    for a in articles:
+        line = a["title"]
+        if a["byline"]:
+            line += f" — {a['byline']}"
+        out.append(f"  * {line}")
+    for a in articles:
+        out += ["", "", rule]
+        if a["rubric"]:
+            out.append(a["rubric"].upper())
+        out.append(a["title"])
+        if a["dek"]:
+            out.append(a["dek"])
+        if a["byline"]:
+            out.append(f"By {a['byline']}")
+        out += [rule, ""]
+        text = re.sub(r"<[^>]+>", "\n", a["body_html"])
+        text = html_module.unescape(text)
+        out += [line for line in
+                (segment.strip() + "\n" for segment in text.split("\n")
+                 if segment.strip())]
+        if a["truncated"]:
+            out.append("[Article truncated by paywall — add subscriber "
+                       "cookies to get full text.]")
+    return "\n".join(out) + "\n"
+
+
+# --------------------------------------------------------------------------
 # Email
 # --------------------------------------------------------------------------
 
-def email_to_kindle(config: configparser.ConfigParser, pdf_path: Path,
+ATTACHMENT_TYPES = {
+    ".pdf": ("application", "pdf"),
+    ".epub": ("application", "epub+zip"),
+    ".txt": ("text", "plain"),
+}
+
+
+def email_to_kindle(config: configparser.ConfigParser, attachment: Path,
                     issue_date: str) -> None:
     kindle_email = config.get("kindle", "kindle_email", fallback="").strip()
     host = config.get("smtp", "host", fallback="smtp.gmail.com")
@@ -356,18 +537,23 @@ def email_to_kindle(config: configparser.ConfigParser, pdf_path: Path,
             + ". Copy config.example.ini to config.ini and fill it in."
         )
 
+    maintype, subtype = ATTACHMENT_TYPES[attachment.suffix]
     msg = EmailMessage()
     msg["From"] = sender
     msg["To"] = kindle_email
-    # Subject "convert" tells Amazon to convert the PDF to a reflowable
-    # Kindle document instead of showing fixed pages.
-    msg["Subject"] = "convert" if convert else f"The New Yorker {issue_date}"
+    # Subject "convert" tells Amazon to convert a PDF to a reflowable
+    # Kindle document instead of fixed pages. EPUB and TXT are always
+    # converted, so the subject doesn't matter for them.
+    if attachment.suffix == ".pdf" and convert:
+        msg["Subject"] = "convert"
+    else:
+        msg["Subject"] = f"The New Yorker {issue_date}"
     msg.set_content(f"The New Yorker, issue of {issue_date}.")
     msg.add_attachment(
-        pdf_path.read_bytes(),
-        maintype="application",
-        subtype="pdf",
-        filename=pdf_path.name,
+        attachment.read_bytes(),
+        maintype=maintype,
+        subtype=subtype,
+        filename=attachment.name,
     )
 
     context = ssl.create_default_context()
@@ -380,7 +566,7 @@ def email_to_kindle(config: configparser.ConfigParser, pdf_path: Path,
             smtp.starttls(context=context)
             smtp.login(username, password)
             smtp.send_message(msg)
-    print(f"Emailed {pdf_path.name} to {kindle_email}")
+    print(f"Emailed {attachment.name} to {kindle_email}")
 
 
 # --------------------------------------------------------------------------
@@ -404,6 +590,10 @@ def main() -> int:
                         help="Only scrape the first N articles (for testing)")
     parser.add_argument("--no-email", action="store_true",
                         help="Build the PDF but don't email it")
+    parser.add_argument("--format", choices=["pdf", "epub", "txt"],
+                        default=None,
+                        help="Output format (default: 'format' in config.ini, "
+                             "else epub)")
     parser.add_argument("--issue", default=None, metavar="YYYY-MM-DD",
                         help="Build a specific issue instead of the current "
                              "one (also accepts a full issue URL)")
@@ -464,10 +654,17 @@ def main() -> int:
             print("No articles could be scraped; giving up.", file=sys.stderr)
             return 1
 
+        fmt = args.format or config.get("kindle", "format", fallback="epub")
         output = Path(args.output) if args.output else Path(
-            f"new-yorker-{issue_date}.pdf")
-        print(f"Building PDF ({output})...")
-        html_to_pdf(build_html(issue_date, articles), output)
+            f"new-yorker-{issue_date}.{fmt}")
+        print(f"Building {fmt.upper()} ({output})...")
+        if fmt == "pdf":
+            html_to_pdf(build_html(issue_date, articles), output)
+        elif fmt == "epub":
+            build_epub(issue_date, articles, output)
+        else:
+            output.write_text(build_txt(issue_date, articles),
+                              encoding="utf-8")
         size_mb = output.stat().st_size / (1024 * 1024)
         print(f"Wrote {output} ({size_mb:.1f} MB)")
 
