@@ -405,7 +405,10 @@ def build_epub(issue_date: str, articles: list[dict], output_path: Path) -> None
                 '<item id="css" href="style.css" media-type="text/css"/>',
                 '<item id="cover" href="cover.xhtml" '
                 'media-type="application/xhtml+xml"/>']
-    spine = ['<itemref idref="cover"/>']
+    # nav.xhtml in the spine makes the table of contents a visible,
+    # clickable page right after the cover (it also powers the reader's
+    # built-in Contents menu).
+    spine = ['<itemref idref="cover"/>', '<itemref idref="nav"/>']
     for i, (name, _) in enumerate(chapters, 1):
         manifest.append(f'<item id="c{i}" href="{name}" '
                         'media-type="application/xhtml+xml"/>')
